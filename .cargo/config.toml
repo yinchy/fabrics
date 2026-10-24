@@ -1,0 +1,3 @@
+# Every package in this repo is a spatial-fabric module.
+[build]
+target = "wasm32-unknown-unknown"

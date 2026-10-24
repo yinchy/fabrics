@@ -1,0 +1,10 @@
+{
+   "Container": "digital-clock",
+   "Services": {},
+   "Modules": [
+      {
+         "sUrl": "digital_clock.wasm?v=2",
+         "sHash": ""
+      }
+   ]
+}
