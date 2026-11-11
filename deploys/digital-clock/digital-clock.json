@@ -3,8 +3,27 @@
    "Services": {},
    "Modules": [
       {
-         "sUrl": "digital_clock.wasm?v=2",
+         "sUrl": "digital_clock.wasm?v=4",
          "sHash": ""
       }
-   ]
+   ],
+   "Data": {
+      "Panel": {
+         "Transform": {
+            "Position": [0, 0, 0],
+            "Rotation": [0, 0, 0, 1],
+            "Scale": [1, 1, 1]
+         },
+         "Bound": {
+            "Max": [100, 100, 0]
+         },
+         "Properties": {
+            "nWidth": 0,
+            "nHeight": 512,
+            "bDensity": 2,
+            "bScale": 1,
+            "bBillboard": 1
+         }
+      }
+   }
 }

@@ -1,0 +1,29 @@
+{
+   "Container": "clock-toggle",
+   "Services": {},
+   "Modules": [
+      {
+         "sUrl": "clock_toggle.wasm?v=2",
+         "sHash": ""
+      }
+   ],
+   "Data": {
+      "Panel": {
+         "Transform": {
+            "Position": [0, 0, 0],
+            "Rotation": [0, 0, 0, 1],
+            "Scale": [1, 1, 1]
+         },
+         "Bound": {
+            "Max": [100, 100, 0]
+         },
+         "Properties": {
+            "nWidth": 0,
+            "nHeight": 512,
+            "bDensity": 2,
+            "bScale": 1,
+            "bBillboard": 1
+         }
+      }
+   }
+}
