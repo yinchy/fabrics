@@ -18,16 +18,27 @@ fn fetch (url: &str) -> Vec<u8>
 }
 
 #[test]
-fn dallas_tile_has_buildings_and_relief ()
+fn lax_two_km_tile_builds ()
 {
-   let window = Window::new (32.778038, -96.800537, 480.0, 480.0, 256);
+   let (built, nv, nd) = build_at (33.942791, -118.410042, 2000.0, 2000.0);
+
+   eprintln! ("LAX 2 km: {nv} vector tiles, {nd} elevation tiles, {} footprints, terrain {} tris, ground {} tris, buildings {} tris, ground {} B, buildings {} B, wire {} B, relief {:.1}..{:.1}, finest {:.2} m",
+      built.footprints, built.terrain_tris, built.ground_tris, built.building_tris,
+      built.ground.len (), built.buildings.len (), built.wire.len (), built.elev_min, built.elev_max, built.cell_m);
+
+   assert! (built.ground.starts_with (b"glTF"));
+}
+
+fn build_at (lat: f64, lon: f64, width: f64, length: f64) -> (draw::Built, usize, usize)
+{
+   let window = Window::new (lat, lon, width, length, 256);
    let (west, south, east, north) = window.bounds ();
    let vectors = geom::tiles_covering (west, south, east, north, geom::VECTOR_Z);
    let dem_z = geom::dem_zoom (geom::tiles_covering (west, south, east, north, 15).len ());
    let dems = geom::tiles_covering (west, south, east, north, dem_z);
 
-   assert! (vectors.len () <= 4, "vector tiles {}", vectors.len ());
-   assert! (dems.len () <= 4, "dem tiles {}", dems.len ());
+   assert! (vectors.len () <= 16, "vector tiles {}", vectors.len ());
+   assert! (dems.len () <= 16, "dem tiles {}", dems.len ());
 
    let mut vector_bytes = Vec::new ();
 
@@ -51,13 +62,15 @@ fn dallas_tile_has_buildings_and_relief ()
    let dem = DemSet::new (grids);
    let started = std::time::Instant::now ();
    let built = draw::build (&window, &refs, &dem, tin::min_patch_metres (None), tin::max_error_metres (None));
-   let took = started.elapsed ();
+   eprintln! ("build took {:?}", started.elapsed ());
 
-   eprintln! (
-      "footprints {} ({} tris) terrain {} tris, ground {} tris, relief {:.1}..{:.1} finest {:.2} m top {:.1} | ground {} bldg {} wire {} bytes | {:?}",
-      built.footprints, built.building_tris, built.terrain_tris, built.ground_tris, built.elev_min, built.elev_max,
-      built.cell_m, built.top, built.ground.len (), built.buildings.len (), built.wire.len (), took
-   );
+   (built, vectors.len (), dems.len ())
+}
+
+#[test]
+fn dallas_tile_has_buildings_and_relief ()
+{
+   let (built, _, _) = build_at (32.778038, -96.800537, 480.0, 480.0);
 
    assert! (built.footprints > 5, "expected downtown footprints");
    assert! (built.elev_max > built.elev_min);
