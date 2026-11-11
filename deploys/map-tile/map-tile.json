@@ -3,7 +3,7 @@
    "Services": {},
    "Modules": [
       {
-         "sUrl": "map_tile.wasm?v=5",
+         "sUrl": "map_tile.wasm?v=8",
          "sHash": ""
       }
    ],
@@ -21,35 +21,15 @@
    },
    "Data": {
       "Origin": {
-         "dLat": 32.778038,
-         "dLon": -96.800537
+         "dLat": 40.758,
+         "dLon": -73.9855
       },
       "Extent": {
-         "dWidthM": 480,
-         "dLengthM": 480
-      },
-      "Tile": {
-         "nPixels": 256
+         "dWidthM": 500,
+         "dLengthM": 500
       },
       "Toggle": {
          "sKey": "R"
-      },
-      "Panel": {
-         "Transform": {
-            "Position": [0, 0, 0],
-            "Rotation": [0, 0, 0, 1],
-            "Scale": [1, 1, 1]
-         },
-         "Bound": {
-            "Max": [480, 480, 0]
-         },
-         "Properties": {
-            "nWidth": 256,
-            "nHeight": 256,
-            "bDensity": 1,
-            "bScale": 1,
-            "bBillboard": 2
-         }
       }
    }
 }

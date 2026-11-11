@@ -11,7 +11,7 @@ pub enum Kind
    Landuse (u32),
    Landcover (u32),
    Water,
-   Road { width_px: i32, color: u32 },
+   Road { width_m: f64, rank: u32, color: u32 },
 }
 
 pub struct Shape
@@ -270,17 +270,18 @@ fn land_color (class: &str, cover: bool) -> u32
    }
 }
 
-fn road_style (class: &str) -> Option<(i32, u32)>
+// Width in metres, stacking rank, colour.
+fn road_style (class: &str) -> Option<(f64, u32, u32)>
 {
    match class
    {
-      "motorway" | "trunk" => Some ((4, 0xe2c36a)),
-      "primary" => Some ((3, 0xf0e0a0)),
-      "secondary" | "tertiary" => Some ((2, 0xf4f0e4)),
-      "minor" | "residential" | "unclassified" | "service" | "living_street" | "busway" | "raceway" => Some ((2, 0xded8cc)),
-      "rail" | "transit" | "light_rail" => Some ((2, 0x8a8480)),
+      "motorway" | "trunk" => Some ((12.0, 5, 0xe2c36a)),
+      "primary" => Some ((9.0, 4, 0xf0e0a0)),
+      "secondary" | "tertiary" => Some ((7.0, 3, 0xf4f0e4)),
+      "minor" | "residential" | "unclassified" | "service" | "living_street" | "busway" | "raceway" => Some ((5.0, 2, 0xded8cc)),
+      "rail" | "transit" | "light_rail" => Some ((3.0, 1, 0x8a8480)),
       "path" | "track" | "pedestrian" | "footway" | "steps" | "ferry" | "aerialway" | "corridor" | "platform" => None,
-      _ => Some ((1, 0xd4cec2)),
+      _ => Some ((4.0, 1, 0xd4cec2)),
    }
 }
 
@@ -337,8 +338,8 @@ fn kind_of (layer: &str, props: &[(String, Value)]) -> Option<Kind>
       "transportation" =>
       {
          let class = match get ("class") { Some (Value::Str (s)) => s.as_str (), _ => "" };
-         let (width_px, color) = road_style (class)?;
-         Some (Kind::Road { width_px, color })
+         let (width_m, rank, color) = road_style (class)?;
+         Some (Kind::Road { width_m, rank, color })
       }
       _ => None,
    }

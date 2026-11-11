@@ -1,8 +1,11 @@
 mod dem;
 mod draw;
 mod geom;
-mod mesh;
+mod glb;
 mod mvt;
+mod query;
+mod tess;
+mod tin;
 
 #[cfg(target_arch = "wasm32")]
 mod guest;

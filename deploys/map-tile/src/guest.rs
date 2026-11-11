@@ -3,17 +3,17 @@
 use sneeze::*;
 
 use crate::dem::{self, DemSet};
-use crate::draw::{self, Prism};
+use crate::draw;
 use crate::geom::{self, Window};
 
 const TICK_MS: i32 = 16;
 const MAX_TILES: usize = 16;
-const SPAWN_PER_TICK: usize = 160;
 
-const DEFAULT_LAT: f64 = 32.778038;
-const DEFAULT_LON: f64 = -96.800537;
-const DEFAULT_WIDTH: f64 = 480.0;
-const DEFAULT_LENGTH: f64 = 480.0;
+// Times Square, New York. The fabric JSON normally supplies these.
+const DEFAULT_LAT: f64 = 40.758;
+const DEFAULT_LON: f64 = -73.9855;
+const DEFAULT_WIDTH: f64 = 500.0;
+const DEFAULT_LENGTH: f64 = 500.0;
 const DEFAULT_PIXELS: i32 = 256;
 
 const TYPE_NODE: u16 = 8;
@@ -46,10 +46,9 @@ struct JOB
    dem: Vec<SLOT>,
    ready: bool,
    built: bool,
-   prisms: Vec<Prism>,
-   cursor: usize,
    solid: Option<NODE>,
    wire: Option<NODE>,
+   buildings: Option<NODE>,
    wire_on: bool,
    toggle: u64,
 }
@@ -102,6 +101,22 @@ fn Load (pHost: &HOST) -> Window
    if let Some (s) = pData.Get ("Extent.dLengthM") { dLength = Number (&s, dLength); }
    if let Some (s) = pData.Get ("Tile.nPixels") { nPixels = Whole (&s, nPixels); }
 
+   // The fabric URL's query wins over the JSON:
+   //   ?lat_lon=[40.758,-73.9855]&len_wid=[500,100]   (length north-south, width east-west)
+   let sHref = pHost.Location ().Href ().to_string ();
+   let pPlace = crate::query::lat_lon (&sHref);
+   let pSize = crate::query::len_wid (&sHref);
+
+   if let Some ((dA, dB)) = pPlace { dLat = dA; dLon = dB; }
+   if let Some ((dLen, dWid)) = pSize { dLength = dLen; dWidth = dWid; }
+
+   pHost.Console ().Info (&format! (
+      "map tile: location {} size {} ({})",
+      if pPlace.is_some () { "from the URL" } else { "from the fabric data" },
+      if pSize.is_some () { "from the URL" } else { "from the fabric data" },
+      sHref
+   ));
+
    Window::new (dLat, dLon, dWidth, dLength, nPixels)
 }
 
@@ -109,7 +124,14 @@ fn MinPatch (pHost: &HOST) -> f64
 {
    // Omitted Data.Grid.dMinPatchM stays at 5 m. Non-positive and non-finite too.
    let parsed = pHost.Data ().Get ("Grid.dMinPatchM").map (|s| Number (&s, f64::NAN));
-   crate::mesh::min_patch_metres (parsed)
+   crate::tin::min_patch_metres (parsed)
+}
+
+fn MaxError (pHost: &HOST) -> f64
+{
+   // Omitted Data.Grid.dMaxErrorM stays at 0.3 m. Non-positive and non-finite too.
+   let parsed = pHost.Data ().Get ("Grid.dMaxErrorM").map (|s| Number (&s, f64::NAN));
+   crate::tin::max_error_metres (parsed)
 }
 
 fn FoldKey (nCode: u64) -> u64
@@ -243,7 +265,7 @@ fn Attach (pNode: NODE, aByte: &[u8]) -> bool
    unsafe { Call (aPacket.as_ptr () as i32, aPacket.len () as i32) != 0 }
 }
 
-fn Ground (pHost: &HOST, pRoot: NODE, sName: &str, aByte: &[u8], pWindow: &Window, dRelief: f64) -> Option<NODE>
+fn Model (pHost: &HOST, pRoot: NODE, sName: &str, aByte: &[u8], pWindow: &Window, dHeight: f64) -> Option<NODE>
 {
    let mut pObject = SNEEZE_ABI_MAPOBJECT::Physical ();
 
@@ -252,7 +274,7 @@ fn Ground (pHost: &HOST, pRoot: NODE, sName: &str, aByte: &[u8], pWindow: &Windo
           .Position (0.0, 0.0, 0.0)
           .Rotation (0.0, 0.0, 0.0, 1.0)
           .Scale_Axes (1.0, 1.0, 1.0)
-          .Bound (pWindow.width_m, pWindow.length_m, dRelief.max (1.0));
+          .Bound (pWindow.width_m, pWindow.length_m, dHeight.max (1.0));
 
    let pNode = pHost.Fabric ().Node_Open (&pObject);
 
@@ -283,7 +305,7 @@ fn ShowMode (pJob: &JOB)
 
 fn Assemble (pHost: &HOST, pJob: &mut JOB)
 {
-   let (prisms, solid, wire, buildings, elev_min, elev_max, cell_m, nVector, nDem) = {
+   let (built, nVector, nDem) = {
       let tiles: Vec<(u32, u32, u32, &[u8])> = pJob.vector.iter ().filter_map (|p| {
          let aBody = p.body.as_ref ().filter (|b| !b.is_empty ())?;
          Some ((p.z, p.x, p.y, aBody.as_slice ()))
@@ -292,60 +314,41 @@ fn Assemble (pHost: &HOST, pJob: &mut JOB)
       let grids: Vec<_> = pJob.dem.iter ().filter_map (|p| dem::decode (p.z, p.x, p.y, p.body.as_deref ()?)).collect ();
       let nDem = grids.len ();
       let dem = DemSet::new (grids);
-      let built = draw::build (&pJob.window, &tiles, &dem, MinPatch (pHost));
 
-      (built.prisms, built.solid, built.wire, built.buildings, built.elev_min, built.elev_max, built.cell_m, nVector, nDem)
+      (draw::build (&pJob.window, &tiles, &dem, MinPatch (pHost), MaxError (pHost)), nVector, nDem)
    };
 
    pHost.Console ().Info (&format! (
-      "map tile: {buildings} buildings, {} prisms, relief {elev_min:.0}–{elev_max:.0} m, cell {cell_m:.1} m, mesh {} / {} bytes, {nVector} vector tiles, {nDem} elevation tiles",
-      prisms.len (),
-      solid.len (),
-      wire.len ()
+      "map tile: {} footprints ({} triangles), terrain {} triangles ({} with overlays), relief {:.0}–{:.0} m, finest {:.1} m, ground {} / buildings {} / wire {} bytes, {nVector} vector tiles, {nDem} elevation tiles",
+      built.footprints,
+      built.building_tris,
+      built.terrain_tris,
+      built.ground_tris,
+      built.elev_min,
+      built.elev_max,
+      built.cell_m,
+      built.ground.len (),
+      built.buildings.len (),
+      built.wire.len ()
    ));
 
-   let dRelief = (elev_max - elev_min).max (1.0);
-   pJob.solid = Ground (pHost, pJob.root, "Terrain", &solid, &pJob.window, dRelief);
-   pJob.wire = Ground (pHost, pJob.root, "Terrain wire", &wire, &pJob.window, dRelief);
+   let dRelief = (built.elev_max - built.elev_min).max (1.0);
+   pJob.solid = Model (pHost, pJob.root, "Ground", &built.ground, &pJob.window, dRelief);
+   pJob.wire = Model (pHost, pJob.root, "Ground wire", &built.wire, &pJob.window, dRelief);
+   pJob.buildings = Model (pHost, pJob.root, "Buildings", &built.buildings, &pJob.window, built.top.max (dRelief));
    pJob.wire_on = false;
    ShowMode (pJob);
 
    if pJob.solid.is_none ()
    {
-      pHost.Console ().Error ("map tile: terrain mesh was not created");
+      pHost.Console ().Error ("map tile: ground mesh was not created");
    }
-
-   pJob.prisms = prisms;
 
    for p in &mut pJob.vector { p.body = None; }
    for p in &mut pJob.dem { p.body = None; }
 
    pJob.built = true;
    pHost.Console ().Info (&format! ("map tile: press {} to switch solid and wireframe", KeyLabel (pJob.toggle)));
-}
-
-fn Spawn (pHost: &HOST, pJob: &mut JOB)
-{
-   let nEnd = (pJob.cursor + SPAWN_PER_TICK).min (pJob.prisms.len ());
-
-   while pJob.cursor < nEnd
-   {
-      let p = pJob.prisms[pJob.cursor];
-      pJob.cursor += 1;
-
-      let mut pObject = SNEEZE_ABI_MAPOBJECT::Physical ();
-      let sUrl = format! ("res/b{}.glb", p.bin);
-
-      pObject.Name ("Building")
-             .Parent (pJob.root.Class (), pJob.root.ObjectIx ())
-             .Position (p.east, p.north, p.z)
-             .Rotation (0.0, 0.0, p.qz, p.qw)
-             .Scale_Axes (p.sx, p.sy, p.sz)
-             .Bound (p.sx, p.sy, p.sz)
-             .Reference (&sUrl);
-
-      pHost.Fabric ().Node_Open (&pObject);
-   }
 }
 
 fn OnKey (pHost: &HOST, nCode: u64)
@@ -397,10 +400,9 @@ impl INSTANCE for MAP
          dem: Vec::new (),
          ready: false,
          built: false,
-         prisms: Vec::new (),
-         cursor: 0,
          solid: None,
          wire: None,
+         buildings: None,
          wire_on: false,
          toggle: ToggleCode (pHost),
       };
@@ -478,10 +480,6 @@ impl INSTANCE for MAP
       if pJob.ready && !pJob.built
       {
          Assemble (pHost, pJob);
-      }
-      else if pJob.built && pJob.cursor < pJob.prisms.len ()
-      {
-         Spawn (pHost, pJob);
       }
    }
 

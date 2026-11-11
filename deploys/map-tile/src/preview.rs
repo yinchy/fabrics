@@ -1,6 +1,7 @@
 use crate::dem::{self, DemSet};
 use crate::draw;
 use crate::geom::{self, Window};
+use crate::tin;
 
 fn fetch (url: &str) -> Vec<u8>
 {
@@ -48,27 +49,29 @@ fn dallas_tile_has_buildings_and_relief ()
 
    let refs: Vec<(u32, u32, u32, &[u8])> = vector_bytes.iter ().map (|(z, x, y, b)| (*z, *x, *y, b.as_slice ())).collect ();
    let dem = DemSet::new (grids);
-   let built = draw::build (&window, &refs, &dem, crate::mesh::min_patch_metres (None));
+   let started = std::time::Instant::now ();
+   let built = draw::build (&window, &refs, &dem, tin::min_patch_metres (None), tin::max_error_metres (None));
+   let took = started.elapsed ();
 
    eprintln! (
-      "buildings {} prisms {} relief {:.1}..{:.1} cell {:.2} m solid {} wire {} image {}x{}",
-      built.buildings, built.prisms.len (), built.elev_min, built.elev_max, built.cell_m,
-      built.solid.len (), built.wire.len (), built.width, built.height
+      "footprints {} ({} tris) terrain {} tris, ground {} tris, relief {:.1}..{:.1} finest {:.2} m top {:.1} | ground {} bldg {} wire {} bytes | {:?}",
+      built.footprints, built.building_tris, built.terrain_tris, built.ground_tris, built.elev_min, built.elev_max,
+      built.cell_m, built.top, built.ground.len (), built.buildings.len (), built.wire.len (), took
    );
 
-   assert! (built.buildings > 5, "expected downtown footprints");
-   assert! (!built.prisms.is_empty ());
+   assert! (built.footprints > 5, "expected downtown footprints");
    assert! (built.elev_max > built.elev_min);
    assert! (built.elev_min > 50.0 && built.elev_max < 400.0);
    assert! (built.cell_m + 0.05 >= 5.0, "cell {}", built.cell_m);
-   assert! (built.solid.starts_with (b"glTF"), "solid glb");
+   assert! (built.terrain_tris >= 2 && built.terrain_tris < 8192, "terrain {}", built.terrain_tris);
+   assert! (built.ground_tris > built.terrain_tris, "overlays should add triangles");
+   assert! (built.ground.starts_with (b"glTF"), "ground glb");
+   assert! (built.buildings.starts_with (b"glTF"), "buildings glb");
    assert! (built.wire.starts_with (b"glTF"), "wire glb");
 
-   let path = std::env::temp_dir ().join ("map-tile-preview.png");
-   let file = std::fs::File::create (&path).unwrap ();
-   let mut encoder = png::Encoder::new (file, built.width as u32, built.height as u32);
-   encoder.set_color (png::ColorType::Rgba);
-   encoder.set_depth (png::BitDepth::Eight);
-   encoder.write_header ().unwrap ().write_image_data (&built.rgba).unwrap ();
-   eprintln! ("wrote {}", path.display ());
+   let dir = std::env::temp_dir ();
+   std::fs::write (dir.join ("map-tile-ground.glb"), &built.ground).unwrap ();
+   std::fs::write (dir.join ("map-tile-buildings.glb"), &built.buildings).unwrap ();
+   std::fs::write (dir.join ("map-tile-wire.glb"), &built.wire).unwrap ();
+   eprintln! ("wrote glbs to {}", dir.display ());
 }
