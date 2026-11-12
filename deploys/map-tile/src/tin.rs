@@ -104,9 +104,16 @@ impl Tin
       let elev_max = known.fold (f64::NEG_INFINITY, f64::max);
       let (elev_min, elev_max) = if elev_min.is_finite () { (elev_min, elev_max) } else { (0.0, 0.0) };
 
+      // Heights stay true metres above sea level; the mesh is not re-based to
+      // its lowest sample. Cells with no data take the lowest known height.
+      let fill = if elev_min.is_finite () { elev_min } else { 0.0 };
+
       for h in raw.iter_mut ()
       {
-         *h = if h.is_finite () { *h - elev_min } else { 0.0 };
+         if !h.is_finite ()
+         {
+            *h = fill;
+         }
       }
 
       let tris = select (&raw, size, max_error);
@@ -570,8 +577,24 @@ mod tests
       // The TIN stays within the budget of the sampled surface.
       let (e, n) = (-240.0 + 40.0 * 7.5, 240.0 - 20.0 * 7.5);
       let truth = hill (40.0, 20.0);
-      let got = tin.height_at (e, n) + tin.elev_min;
+      let got = tin.height_at (e, n);
       assert! ((got - truth).abs () <= 0.3 + 1e-6, "{got} vs {truth}");
+   }
+
+   #[test]
+   fn heights_are_not_rebased ()
+   {
+      let k = 4;
+      let tin = Tin::from_grid (&window (), k, grid (k, |_, _| 120.0), 0.3);
+
+      assert! (tin.v.iter ().all (|p| (p[2] - 120.0).abs () < 1e-9), "mesh moved off its true height");
+      assert! ((tin.height_at (0.0, 0.0) - 120.0).abs () < 1e-9);
+
+      // A hole in the data neither shifts the rest nor drops to zero.
+      let mut raw = grid (k, |_, _| 120.0);
+      raw[7] = f64::NAN;
+      let tin = Tin::from_grid (&window (), k, raw, 0.3);
+      assert! (tin.v.iter ().all (|p| (p[2] - 120.0).abs () < 1e-9));
    }
 
    #[test]

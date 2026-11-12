@@ -332,7 +332,9 @@ fn Assemble (pHost: &HOST, pJob: &mut JOB)
       built.wire.len ()
    ));
 
-   let dRelief = (built.elev_max - built.elev_min).max (1.0);
+   // Heights are absolute (metres above sea level), so the bound reaches the
+   // highest ground or roof rather than the relief.
+   let dRelief = built.elev_max.max (1.0);
    pJob.solid = Model (pHost, pJob.root, "Ground", &built.ground, &pJob.window, dRelief);
    pJob.wire = Model (pHost, pJob.root, "Ground wire", &built.wire, &pJob.window, dRelief);
    pJob.buildings = Model (pHost, pJob.root, "Buildings", &built.buildings, &pJob.window, built.top.max (dRelief));

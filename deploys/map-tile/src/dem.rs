@@ -58,7 +58,9 @@ pub fn decode (z: u32, x: u32, y: u32, png_bytes: &[u8]) -> Option<Grid>
       };
 
       let h = (f64::from (r) * 256.0 + f64::from (g) + f64::from (b) / 256.0) - 32768.0;
-      elev.push (h as f32);
+      // Terrarium voids and corrupt pixels (-32768 and the like) are not
+      // elevations; mark them as no data rather than let them drag the mesh.
+      elev.push (if (-500.0..=9000.0).contains (&h) { h as f32 } else { f32::NAN });
    }
 
    Some (Grid { z, x, y, size: w, elev })

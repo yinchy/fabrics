@@ -3,7 +3,7 @@
    "Services": {},
    "Modules": [
       {
-         "sUrl": "map_tile.wasm?v=8",
+         "sUrl": "map_tile.wasm?v=9",
          "sHash": ""
       }
    ],
