@@ -1,0 +1,64 @@
+{
+   "Container": "DFW_ADSBfi",
+   "Services": [],
+   "Modules": [
+      {
+         "sUrl": "wasm/DFW_ADSBfi.wasm?v=3"
+      }
+   ],
+   "Primary": {
+      "rgbBackground": "071018",
+      "Ambient": {
+         "fBrightness": 0.55,
+         "fColor": "C8D8F0"
+      },
+      "Directional": {
+         "fBrightness": 1.4,
+         "fColor": "FFF4E0",
+         "Rotation": [
+            0.0,
+            0.3827,
+            0.0,
+            0.9239
+         ]
+      }
+   },
+   "Data": {
+      "Origin": {
+         "sName": "DFW",
+         "dLat": 32.896944,
+         "dLon": -97.038056
+      },
+      "RadiusMiles": 10.0,
+      "IconLengthMetres": 40.0,
+      "Panel": {
+         "dX": 0.0,
+         "dY": 0.0,
+         "dZ": 1500.0,
+         "dScale": 0.375,
+         "dWidth": 0.25,
+         "dHeight": 0.25
+      },
+      "Label": {
+         "Transform": {
+            "Scale": [1, 1, 1]
+         },
+         "Bound": {
+            "Max": [50, 16, 0]
+         },
+         "dAbove": 12.0,
+         "Properties": {
+            "nWidth": 0,
+            "nHeight": 160,
+            "bDensity": 2,
+            "bScale": 1,
+            "bBillboard": 1
+         }
+      },
+      "ADSB": {
+         "sUrl": "https://opendata.adsb.fi/api/v3",
+         "nIntervalSec": 5,
+         "nLagSec": 5
+      }
+   }
+}
