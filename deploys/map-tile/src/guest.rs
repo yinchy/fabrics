@@ -134,6 +134,13 @@ fn MaxError (pHost: &HOST) -> f64
    crate::tin::max_error_metres (parsed)
 }
 
+fn LayerGap (pHost: &HOST) -> Option<f64>
+{
+   // Data.Grid.dLayerGapM: lift between overlapping patches. Omitted or
+   // non-positive means automatic, from the window size.
+   pHost.Data ().Get ("Grid.dLayerGapM").map (|s| Number (&s, f64::NAN))
+}
+
 fn FoldKey (nCode: u64) -> u64
 {
    if (b'a' as u64..=b'z' as u64).contains (&nCode) { nCode - 32 } else { nCode }
@@ -315,7 +322,7 @@ fn Assemble (pHost: &HOST, pJob: &mut JOB)
       let nDem = grids.len ();
       let dem = DemSet::new (grids);
 
-      (draw::build (&pJob.window, &tiles, &dem, MinPatch (pHost), MaxError (pHost)), nVector, nDem)
+      (draw::build (&pJob.window, &tiles, &dem, MinPatch (pHost), MaxError (pHost), LayerGap (pHost)), nVector, nDem)
    };
 
    pHost.Console ().Info (&format! (
@@ -334,6 +341,15 @@ fn Assemble (pHost: &HOST, pJob: &mut JOB)
 
    // Heights are absolute (metres above sea level), so the bound reaches the
    // highest ground or roof rather than the relief.
+   pHost.Console ().Info (&format! (
+      "map tile: z-fight guard: {} overlapping ground patches stacked in {} levels of {:.3} m ({} held at the limit), {} roof overlaps raised",
+      built.overlaps,
+      built.levels,
+      built.gap_m,
+      built.capped,
+      built.roof_overlaps
+   ));
+
    let dRelief = built.elev_max.max (1.0);
    pJob.solid = Model (pHost, pJob.root, "Ground", &built.ground, &pJob.window, dRelief);
    pJob.wire = Model (pHost, pJob.root, "Ground wire", &built.wire, &pJob.window, dRelief);

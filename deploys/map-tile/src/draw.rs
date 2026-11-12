@@ -10,6 +10,7 @@ use crate::glb::{self, Mesh, Prim};
 use crate::mvt::{self, Kind, Shape};
 use crate::tess::{self, Poly};
 use crate::tin::{self, Tin};
+use crate::zorder;
 
 const BASE: [u8; 3] = [147, 154, 124];
 const WATER: u32 = 0x3d7ea8;
@@ -52,9 +53,18 @@ pub struct Built
    pub elev_min: f64,
    pub elev_max: f64,
    pub top: f64,
+   /// Vertical spacing used between stacked patches, metres.
+   pub gap_m: f64,
+   /// Overlapping ground patches of different material (each a potential z-fight).
+   pub overlaps: usize,
+   /// Levels the ground patches were stacked into, and how many hit the limit.
+   pub levels: u32,
+   pub capped: usize,
+   /// Overlapping roofs that met within the gap and were raised apart.
+   pub roof_overlaps: usize,
 }
 
-pub fn build (window: &Window, tiles: &[(u32, u32, u32, &[u8])], dem: &DemSet, min_patch_m: f64, max_error_m: f64) -> Built
+pub fn build (window: &Window, tiles: &[(u32, u32, u32, &[u8])], dem: &DemSet, min_patch_m: f64, max_error_m: f64, layer_gap_m: Option<f64>) -> Built
 {
    let mut shapes: Vec<Shape> = Vec::new ();
 
@@ -73,9 +83,11 @@ pub fn build (window: &Window, tiles: &[(u32, u32, u32, &[u8])], dem: &DemSet, m
    let mut landcover: Vec<(f64, Poly, [u8; 3])> = Vec::new ();
    let mut water: Vec<(f64, Poly, [u8; 3])> = Vec::new ();
    let mut roads: Vec<(u32, f64, [u8; 3], Vec<tess::Pt>)> = Vec::new ();
+   let mut blocks: Vec<Block> = Vec::new ();
    let mut buildings = Mesh::default ();
    let mut footprints = 0;
    let mut top = 0.0f64;
+   let gap = zorder::gap_metres (window.width_m, window.length_m, layer_gap_m);
 
    for shape in &shapes
    {
@@ -106,27 +118,55 @@ pub fn build (window: &Window, tiles: &[(u32, u32, u32, &[u8])], dem: &DemSet, m
                let Some (poly) = trim (window, poly) else { continue };
 
                footprints += 1;
-               top = top.max (extrude (&tin, &poly, height, min_h, buildings.prim (rgb)));
+               blocks.push (Block { roof: roof_of (&tin, &poly, height), poly, min_h, rgb });
             }
          }
       }
    }
 
-   layer (&tin, &mut ground, landuse, 0.04);
-   layer (&tin, &mut ground, landcover, 0.16);
-   layer (&tin, &mut ground, water, 0.28);
+   // Overlapping patches of different material are lifted apart, in draw
+   // order: land use, land cover, water, then roads by rank.
+   let by_area = |a: &(f64, Poly, [u8; 3]), b: &(f64, Poly, [u8; 3])| b.0.partial_cmp (&a.0).unwrap_or (std::cmp::Ordering::Equal);
 
+   landuse.sort_by (by_area);
+   landcover.sort_by (by_area);
+   water.sort_by (by_area);
    roads.sort_by_key (|r| r.0);
 
-   for (rank, width_m, rgb, line) in &roads
-   {
-      let prim = ground.prim (*rgb);
-      let lift = 0.42 + 0.06 * f64::from (*rank);
+   let mut patches: Vec<zorder::Patch> = Vec::new ();
 
-      for tri in tess::ribbon (line, width_m * 0.5)
+   for (_, poly, rgb) in landuse.iter ().chain (&landcover).chain (&water)
+   {
+      patches.push (zorder::Patch { rgb: *rgb, tris: tess::triangulate (poly) });
+   }
+
+   for (_, width_m, rgb, line) in &roads
+   {
+      patches.push (zorder::Patch { rgb: *rgb, tris: tess::ribbon (line, width_m * 0.5) });
+   }
+
+   let plan = zorder::plan (window.width_m, window.length_m, &patches, |a, b| patches[a].rgb != patches[b].rgb);
+
+   for (patch, level) in patches.iter ().zip (&plan.level)
+   {
+      let prim = ground.prim (patch.rgb);
+      let lift = gap * f64::from (level + 1);
+
+      for tri in &patch.tris
       {
-         tin.drape (&tri, lift, prim);
+         tin.drape (tri, lift, prim);
       }
+   }
+
+   // Roofs of overlapping buildings at the same height would fight too; a
+   // roof that meets an earlier one within the gap is raised clear of it.
+   let flats: Vec<zorder::Patch> = blocks.iter ().map (|b| zorder::Patch { rgb: b.rgb, tris: tess::triangulate (&b.poly) }).collect ();
+   let roofs = zorder::plan (window.width_m, window.length_m, &flats,
+      |a, b| (blocks[a].roof - blocks[b].roof).abs () < gap && blocks[a].rgb != blocks[b].rgb);
+
+   for (b, level) in blocks.iter ().zip (&roofs.level)
+   {
+      top = top.max (extrude (&tin, &b.poly, b.roof + gap * f64::from (*level), b.min_h, buildings.prim (b.rgb)));
    }
 
    let wire = tin.wire ();
@@ -144,6 +184,11 @@ pub fn build (window: &Window, tiles: &[(u32, u32, u32, &[u8])], dem: &DemSet, m
       elev_min: tin.elev_min,
       elev_max: tin.elev_max,
       top,
+      gap_m: gap,
+      overlaps: plan.pairs,
+      levels: plan.depth + 1,
+      capped: plan.capped,
+      roof_overlaps: roofs.pairs,
    }
 }
 
@@ -155,31 +200,26 @@ fn collect (out: &mut Vec<(f64, Poly, [u8; 3])>, rings: &[Vec<tess::Pt>], rgb: [
    }
 }
 
-// Big areas first, so a small patch sits a hair above the one that holds it.
-fn layer (tin: &Tin, ground: &mut Mesh, mut polys: Vec<(f64, Poly, [u8; 3])>, base: f64)
+struct Block
 {
-   polys.sort_by (|a, b| b.0.partial_cmp (&a.0).unwrap_or (std::cmp::Ordering::Equal));
-
-   for (k, (_, poly, rgb)) in polys.iter ().enumerate ()
-   {
-      let lift = base + 0.015 * k.min (6) as f64;
-      let prim = ground.prim (*rgb);
-
-      for tri in tess::triangulate (poly)
-      {
-         tin.drape (&tri, lift, prim);
-      }
-   }
+   poly: Poly,
+   min_h: f64,
+   rgb: [u8; 3],
+   roof: f64,
 }
 
-// Walls rise from the terrain under every footprint vertex; the roof is flat
-// at the lowest ground under the footprint plus the building height.
-// Returns the roof height above the terrain minimum.
-fn extrude (tin: &Tin, poly: &Poly, height: f64, min_h: f64, prim: &mut Prim) -> f64
+// The roof is flat at the lowest ground under the footprint plus the height.
+fn roof_of (tin: &Tin, poly: &Poly, height: f64) -> f64
+{
+   poly.outer.iter ().map (|p| tin.height_at (p.0, p.1)).fold (f64::INFINITY, f64::min) + height
+}
+
+// Walls rise from the terrain under every footprint vertex up to the roof.
+// Returns the roof height.
+fn extrude (tin: &Tin, poly: &Poly, roof: f64, min_h: f64, prim: &mut Prim) -> f64
 {
    let ground_at = |p: &tess::Pt| tin.height_at (p.0, p.1);
-   let base = poly.outer.iter ().map (ground_at).fold (f64::INFINITY, f64::min);
-   let roof = base + height;
+   let base = roof_of (tin, poly, 0.0);
    let floating = min_h > 0.0;
    let floor = base + min_h;
 

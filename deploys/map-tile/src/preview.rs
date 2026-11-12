@@ -29,6 +29,19 @@ fn lax_two_km_tile_builds ()
    assert! (built.ground.starts_with (b"glTF"));
 }
 
+#[test]
+fn lax_wide_window_stacks_without_hitting_the_limit ()
+{
+   let (built, nv, nd) = build_at (33.942791, -118.410042, 3000.0, 7000.0);
+
+   eprintln! ("LAX 3x7 km: {nv} vector tiles, {nd} elevation tiles, {} footprints, relief {:.1}..{:.1}, {} overlaps, {} levels of {:.3} m, {} capped, {} roof overlaps",
+      built.footprints, built.elev_min, built.elev_max, built.overlaps, built.levels, built.gap_m, built.capped, built.roof_overlaps);
+
+   assert! (built.gap_m > 0.25, "gap {}", built.gap_m);
+   assert! (built.capped == 0, "{} patches held at the level limit", built.capped);
+   assert! (built.levels < crate::zorder::MAX_LEVEL, "levels {}", built.levels);
+}
+
 fn build_at (lat: f64, lon: f64, width: f64, length: f64) -> (draw::Built, usize, usize)
 {
    let window = Window::new (lat, lon, width, length, 256);
@@ -61,7 +74,9 @@ fn build_at (lat: f64, lon: f64, width: f64, length: f64) -> (draw::Built, usize
    let refs: Vec<(u32, u32, u32, &[u8])> = vector_bytes.iter ().map (|(z, x, y, b)| (*z, *x, *y, b.as_slice ())).collect ();
    let dem = DemSet::new (grids);
    let started = std::time::Instant::now ();
-   let built = draw::build (&window, &refs, &dem, tin::min_patch_metres (None), tin::max_error_metres (None));
+   let built = draw::build (&window, &refs, &dem, tin::min_patch_metres (None), tin::max_error_metres (None), None);
+   eprintln! ("z-fight guard: {} overlaps, {} levels of {:.3} m, {} capped, {} roof overlaps",
+      built.overlaps, built.levels, built.gap_m, built.capped, built.roof_overlaps);
    eprintln! ("build took {:?}", started.elapsed ());
 
    (built, vectors.len (), dems.len ())
