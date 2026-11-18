@@ -4,12 +4,14 @@
 // liveATC.c - ADSB.fi air traffic around any origin, as a WASM module.
 // The origin name, position, radius, poll interval, card title and legend
 // panel (size and placement) come from the JSON datablock; see liveATC.json.
-// The fabric URL's query string overrides four of them:
-//   ?name=LAX&lat_lon=[33.9428,-118.4100]&radius=12&interval=5
+// The fabric URL's query string overrides the datablock:
+//   ?name=LAX&lat_lon=[33.9428,-118.4100]&radius=12&interval=5&marker=32&alt=30
 //   name      Data.Origin.sName         origin label, card title, node names
 //   lat_lon   Data.Origin.dLat / dLon   [latitude, longitude] in degrees
 //   radius    Data.RadiusMiles          miles
 //   interval  Data.ADSB.nIntervalSec    seconds between polls
+//   marker    Data.Origin.dSize         origin disk diameter in metres, 0 hides it
+//   alt       Data.Origin.dAlt          metres above sea level; omitted looks it up
 // Brackets are optional, percent-encoding is accepted, and a missing or
 // malformed parameter is ignored so the datablock value applies.
 //
@@ -42,6 +44,7 @@
 #include <string.h>
 
 #include "sneeze.h"
+#include "elev.h"
 
 // --- Design constants ------------------------------------------------------
 
@@ -59,6 +62,10 @@
 #define METRES_PER_DEG_LAT  111320.0
 #define METRES_PER_FOOT     0.3048
 #define ORIGIN_PAD_METRES   64.0      // unit disk in origin.glb, metres
+#define ELEV_Z              14        // Terrarium tile zoom for the origin height
+#define LABEL_NEAR_M        800.0     // distance at which a tag keeps its set size
+#define LABEL_DIST_MIN      0.35      // farthest tags shrink to this fraction
+#define LABEL_DIST_MAX      2.5       // nearest tags grow to this fraction
 #define REQUEST_TIMEOUT_MS  15000
 #define LEGEND_ROWS         10
 #define ICON_LEN_DEFAULT    40.0      // typical narrowbody; override per type
@@ -130,6 +137,7 @@ CRAFT;
 
 static HOST*    s_pHost      = 0;
 static HREQUEST s_hRequest   = 0;
+static HREQUEST s_hElev      = 0;
 static uint64_t s_twTimer    = 0;
 static CRAFT    s_aCraft[MAX_AIRCRAFT];
 static int      s_nCraft     = 0;
@@ -148,6 +156,10 @@ static int      s_nHoldTicks = 0;
 
 static double   s_dOriginLat  = ORIGIN_LAT_DEFAULT;
 static double   s_dOriginLon  = ORIGIN_LON_DEFAULT;
+static double   s_dOriginZ    = 0.0;       // metres above sea level
+static bool     s_bAltSet     = false;     // datablock or query supplied it
+static bool     s_bElevPending = false;
+static double   s_dPadM       = ORIGIN_PAD_METRES;
 static double   s_dRadiusMi   = RADIUS_MI_DEFAULT;
 static double   s_dIconLen    = ICON_LEN_DEFAULT;
 static double   s_dPanelX     = PANEL_X_DEFAULT;
@@ -168,6 +180,8 @@ static double   s_dLabelH     = LABEL_H_M;
 static double   s_dLabelSX    = 1.0;
 static double   s_dLabelSY    = 1.0;
 static double   s_dLabelAbove = LABEL_ABOVE_M;
+static bool     s_bLabelDist  = false;     // scale tags by inverse distance from the origin
+static double   s_dLabelNear  = LABEL_NEAR_M;
 static int      s_nLabelPixW  = 0;
 static int      s_nLabelPixH  = LABEL_RASTER_H;
 static int      s_nLabelDen   = LABEL_DENSITY;
@@ -747,12 +761,14 @@ static void Query_Apply (HOST* pHost)
 {
    const char* sHref = Location_Href (pHost);
    char        aName[sizeof (s_aOriginName)];
-   char        aLog[160];
+   char        aLog[192];
    double      dA;
    double      dB;
    bool        bName = false;
    bool        bPlace = false;
    bool        bRadius = false;
+   bool        bMarker = false;
+   bool        bAlt = false;
 
    s_dQueryInterval = 0.0;
 
@@ -785,10 +801,23 @@ static void Query_Apply (HOST* pHost)
    if (Query_Number (sHref, "interval", &dA)  &&  dA > 0.0)
       s_dQueryInterval = dA;
 
+   if (Query_Number (sHref, "marker", &dA))
+   {
+      s_dPadM = (dA > 0.0) ? dA : 0.0;
+      bMarker = true;
+   }
+
+   if (Query_Number (sHref, "alt", &dA)  &&  dA >= -500.0  &&  dA <= 9000.0)
+   {
+      s_dOriginZ = dA;
+      s_bAltSet  = true;
+      bAlt = true;
+   }
+
    snprintf (aLog, sizeof (aLog),
-      "liveatc: query name %s, lat_lon %s, radius %s, interval %s",
+      "liveatc: query name %s, lat_lon %s, radius %s, interval %s, marker %s, alt %s",
       bName ? "set" : "-", bPlace ? "set" : "-", bRadius ? "set" : "-",
-      s_dQueryInterval > 0.0 ? "set" : "-");
+      s_dQueryInterval > 0.0 ? "set" : "-", bMarker ? "set" : "-", bAlt ? "set" : "-");
    Console_Log (pHost, aLog);
 }
 
@@ -1078,11 +1107,34 @@ static int Craft_Find_Icao (const char* sIcao)
 // The icon's top sits about a quarter of its length above the node. dAbove
 // is further clearance. The panel is centered, so half its height is added
 // and the card's bottom clears the airframe.
-static double Label_Lift (const CRAFT* p)
+// 1 at Label.dNearM from the origin. Nearer tags grow, farther ones shrink,
+// both clamped so a tag on the field does not explode and a distant one stays readable.
+static double Label_Distance_Scale (double dX, double dY)
+{
+   double d;
+   double dS;
+
+   if (!s_bLabelDist)
+      return 1.0;
+
+   d = sqrt (dX * dX + dY * dY);
+   if (d < s_dLabelNear * 0.25)
+      d = s_dLabelNear * 0.25;
+   dS = s_dLabelNear / d;
+   if (dS < LABEL_DIST_MIN)
+      dS = LABEL_DIST_MIN;
+   if (dS > LABEL_DIST_MAX)
+      dS = LABEL_DIST_MAX;
+   return dS;
+}
+
+static double Label_Lift (const CRAFT* p, double dScale)
 {
    double dLen = (p != 0  &&  p->dLengthM > 0.0) ? p->dLengthM : 0.0;
 
-   return s_dLabelAbove + 0.25 * dLen + s_dLabelH * s_dLabelSY * 0.5;
+   if (dScale < LABEL_DIST_MIN)
+      dScale = LABEL_DIST_MIN;
+   return s_dLabelAbove + 0.25 * dLen + s_dLabelH * s_dLabelSY * dScale * 0.5;
 }
 
 static void Craft_Update_Pose (CRAFT* p)
@@ -1103,7 +1155,12 @@ static void Craft_Update_Pose (CRAFT* p)
    Node_Name     (p->qwIcon, aName);
 
    if (Node_IsValid (p->qwLabel))
-      Node_Position (p->qwLabel, dX, dY, dZ + Label_Lift (p));
+   {
+      double dS = Label_Distance_Scale (dX, dY);
+
+      Node_Position  (p->qwLabel, dX, dY, dZ + Label_Lift (p, dS));
+      Node_Scale_Axes (p->qwLabel, s_dLabelSX * dS, s_dLabelSY * dS, 1.0);
+   }
 }
 
 static double Lerp (double dA, double dB, double dT)
@@ -1573,6 +1630,7 @@ static HNODE Label_Open (const CRAFT* p, const char* sSign)
    HMAPOBJECT pPanel;
    HNODE      qw;
    double     dX, dY, dZ;
+   double     dS;
    char       aDoc[1536];
    char       aName[40];
    const char* sNl;
@@ -1583,7 +1641,8 @@ static HNODE Label_Open (const CRAFT* p, const char* sSign)
 
    Label_Document (sSign, aDoc, (int) sizeof (aDoc));
    Geodetic_To_Local (p->dLat, p->dLon, p->dAltM, &dX, &dY, &dZ);
-   dZ += Label_Lift (p);
+   dS = Label_Distance_Scale (dX, dY);
+   dZ += Label_Lift (p, dS);
 
    aName[0] = 0;
    sNl = strchr (sSign, '\n');
@@ -1601,7 +1660,7 @@ static HNODE Label_Open (const CRAFT* p, const char* sSign)
    MapObject_Parent   (pPanel, s_wRootClass, s_twRootIx);
    MapObject_Name     (pPanel, aName);
    MapObject_Position  (pPanel, dX, dY, dZ);
-   MapObject_Scale_Axes (pPanel, s_dLabelSX, s_dLabelSY, 1.0);
+   MapObject_Scale_Axes (pPanel, s_dLabelSX * dS, s_dLabelSY * dS, 1.0);
    MapObject_Bound     (pPanel, 0.0, 0.0, 0.0);
    Label_Configure (pPanel);
 
@@ -1676,17 +1735,32 @@ static void Label_Service (void)
 
 static void Scene_Origin (void)
 {
-   HMAPOBJECT pPad = MapObject_Physical ();
+   HMAPOBJECT pPad;
+   char       aLog[128];
 
+   if (s_dPadM <= 0.0)
+   {
+      snprintf (aLog, sizeof (aLog), "liveatc: origin marker hidden");
+      Console_Log (s_pHost, aLog);
+      s_bPad = true;
+      return;
+   }
+
+   pPad = MapObject_Physical ();
    MapObject_Parent    (pPad, s_wRootClass, s_twRootIx);
    MapObject_Name      (pPad, s_aOriginName);
    MapObject_Reference (pPad, "res/origin.glb");
-   MapObject_Position  (pPad, 0.0, 0.0, 0.0);
-   MapObject_Scale     (pPad, ORIGIN_PAD_METRES);
+   MapObject_Position  (pPad, 0.0, 0.0, s_dOriginZ);
+   MapObject_Scale     (pPad, s_dPadM);
 
    s_qwPad = Fabric_Node_Open (s_pHost, pPad);
    MapObject_Free (pPad);
    s_bPad  = true;
+
+   snprintf (aLog, sizeof (aLog),
+      "liveatc: origin marker %.0f m across, %.1f m above sea level%s",
+      s_dPadM, s_dOriginZ, s_bElevPending ? " (terrain still loading)" : "");
+   Console_Log (s_pHost, aLog);
 }
 
 static void Craft_Spawn (int nIz)
@@ -2324,6 +2398,90 @@ static int Ac_Load (const char* sJson, int nLen)
    return s_nCraft;
 }
 
+static void Origin_Set_Height (double dHeight, const char* sFrom)
+{
+   char aLog[128];
+
+   if (!isfinite (dHeight) || dHeight < -500.0 || dHeight > 9000.0)
+   {
+      snprintf (aLog, sizeof (aLog), "liveatc: terrain height unusable (%s)", sFrom);
+      Console_Log (s_pHost, aLog);
+      return;
+   }
+
+   s_dOriginZ = dHeight;
+   if (Node_IsValid (s_qwPad))
+      Node_Position (s_qwPad, 0.0, 0.0, s_dOriginZ);
+
+   snprintf (aLog, sizeof (aLog), "liveatc: origin height %.1f m (%s)", dHeight, sFrom);
+   Console_Log (s_pHost, aLog);
+}
+
+static void Elev_Apply (const uint8_t* aBody, int nBody)
+{
+   int      nW = 0;
+   int      nH = 0;
+   int      nX = 0;
+   int      nY = 0;
+   double   dX = 0.0;
+   double   dY = 0.0;
+   double   dHeight;
+   uint8_t* aRgb = 0;
+
+   if (!Elev_Rgb (aBody, nBody, &nW, &nH, &aRgb))
+   {
+      Console_Log (s_pHost, "liveatc: terrain tile did not decode");
+      return;
+   }
+
+   Elev_Slippy (s_dOriginLat, s_dOriginLon, ELEV_Z, &nX, &nY, &dX, &dY);
+   dHeight = Elev_Sample (aRgb, nW, nH, dX, dY);
+   free (aRgb);
+   Origin_Set_Height (dHeight, "terrain");
+}
+
+static void Fetch_Elevation (void)
+{
+   int    nX = 0;
+   int    nY = 0;
+   double dX = 0.0;
+   double dY = 0.0;
+   char   aUrl[192];
+   char   aLog[220];
+
+   if (s_pHost == 0 || s_hElev != 0 || s_bAltSet)
+      return;
+
+   Elev_Slippy (s_dOriginLat, s_dOriginLon, ELEV_Z, &nX, &nY, &dX, &dY);
+   snprintf (aUrl, sizeof (aUrl),
+      "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png",
+      ELEV_Z, nX, nY);
+
+   s_hElev = Network_Request_Open (s_pHost, kSNEEZE_ABI_REQUEST_VERB_GET, aUrl);
+   if (!Request_IsValid (s_hElev))
+   {
+      Console_Error (s_pHost, "liveatc: terrain request failed to open");
+      s_hElev = 0;
+      return;
+   }
+
+   Request_Header_Set  (s_hElev, "Accept", "image/png");
+   Request_Header_Set  (s_hElev, "User-Agent", "liveATC/1.0");
+   Request_Timeout_Set (s_hElev, REQUEST_TIMEOUT_MS);
+
+   if (!Request_Send (s_hElev))
+   {
+      Console_Error (s_pHost, "liveatc: terrain request failed to send");
+      Request_Close (s_hElev);
+      s_hElev = 0;
+      return;
+   }
+
+   s_bElevPending = true;
+   snprintf (aLog, sizeof (aLog), "liveatc: terrain tile %s", aUrl);
+   Console_Log (s_pHost, aLog);
+}
+
 static void Fetch_ADSB (void)
 {
    char   aUrl[512];
@@ -2408,6 +2566,13 @@ void Instance_Open (HOST* pHost)
    s_pHost      = pHost;
    s_nCraft     = 0;
    s_hRequest   = 0;
+   s_hElev      = 0;
+   s_bElevPending = false;
+   s_bAltSet    = false;
+   s_dOriginZ   = 0.0;
+   s_dPadM      = ORIGIN_PAD_METRES;
+   s_bLabelDist = false;
+   s_dLabelNear = LABEL_NEAR_M;
    s_twTimer    = 0;
    s_nPollTick  = 0;
    s_qwPad      = 0;
@@ -2423,6 +2588,18 @@ void Instance_Open (HOST* pHost)
 
    Data_Number (pHost, "Origin.dLat", ORIGIN_LAT_DEFAULT, &s_dOriginLat);
    Data_Number (pHost, "Origin.dLon", ORIGIN_LON_DEFAULT, &s_dOriginLon);
+   Data_Number (pHost, "Origin.dSize", ORIGIN_PAD_METRES, &s_dPadM);
+   {
+      char* sAlt = Data_Get (pHost, "Origin.dAlt");
+
+      if (sAlt != 0)
+      {
+         Strip_Json_String (sAlt);
+         s_dOriginZ = atof (sAlt);
+         s_bAltSet  = isfinite (s_dOriginZ);
+         free (sAlt);
+      }
+   }
    Data_Number (pHost, "RadiusMiles", RADIUS_MI_DEFAULT, &s_dRadiusMi);
    Data_Number (pHost, "IconLengthMetres", ICON_LEN_DEFAULT, &s_dIconLen);
    Data_Number (pHost, "Panel.dX",     PANEL_X_DEFAULT,     &s_dPanelX);
@@ -2443,7 +2620,52 @@ void Instance_Open (HOST* pHost)
        || s_aOriginName[0] == 0)
       snprintf (s_aOriginName, sizeof (s_aOriginName), "%s", ORIGIN_NAME_DEFAULT);
    Query_Apply (pHost);
+   if (s_dPadM < 0.0)
+      s_dPadM = 0.0;
+   if (s_dPadM > 2000.0)
+      s_dPadM = 2000.0;
    Label_Load (pHost);
+   {
+      char*  sKey;
+      double dScale = 1.0;
+      char   aFlag[16];
+
+      sKey = Data_Get (pHost, "Label.dWidth");
+      if (sKey != 0)
+      {
+         free (sKey);
+         Data_Number (pHost, "Label.dWidth", s_dLabelW, &s_dLabelW);
+      }
+      sKey = Data_Get (pHost, "Label.dHeight");
+      if (sKey != 0)
+      {
+         free (sKey);
+         Data_Number (pHost, "Label.dHeight", s_dLabelH, &s_dLabelH);
+      }
+      sKey = Data_Get (pHost, "Label.dScale");
+      if (sKey != 0)
+      {
+         free (sKey);
+         Data_Number (pHost, "Label.dScale", 1.0, &dScale);
+         if (dScale > 0.0)
+         {
+            s_dLabelSX *= dScale;
+            s_dLabelSY *= dScale;
+         }
+      }
+      if (s_dLabelSX < 0.05) s_dLabelSX = 0.05;
+      if (s_dLabelSY < 0.05) s_dLabelSY = 0.05;
+      if (s_dLabelSX > 8.0)  s_dLabelSX = 8.0;
+      if (s_dLabelSY > 8.0)  s_dLabelSY = 8.0;
+
+      if (Data_String (pHost, "Label.bByDistance", aFlag, (int) sizeof (aFlag)))
+         s_bLabelDist = !Text_Means_Off (aFlag);
+      Data_Number (pHost, "Label.dNearM", LABEL_NEAR_M, &s_dLabelNear);
+      if (s_dLabelNear < 50.0)
+         s_dLabelNear = 50.0;
+      if (s_dLabelNear > 50000.0)
+         s_dLabelNear = 50000.0;
+   }
    Panel_Wanted_Init (pHost);
    {
       char* sScale = Data_Get (pHost, "Panel.dScale");
@@ -2523,8 +2745,8 @@ void Instance_Open (HOST* pHost)
       s_nLabelBill = LABEL_BILLBOARD;
 
    snprintf (aLog, sizeof (aLog),
-      "liveatc: origin %.5f, %.5f  radius %.1f mi  dart %.0f m  poll %d s  lag %d s",
-      s_dOriginLat, s_dOriginLon, s_dRadiusMi, s_dIconLen, s_nPollSec, s_nLagSec);
+      "liveatc: origin %.5f, %.5f  marker %.0f m  radius %.1f mi  dart %.0f m  poll %d s  lag %d s",
+      s_dOriginLat, s_dOriginLon, s_dPadM, s_dRadiusMi, s_dIconLen, s_nPollSec, s_nLagSec);
    Console_Log (pHost, aLog);
 
    snprintf (aLog, sizeof (aLog),
@@ -2533,10 +2755,15 @@ void Instance_Open (HOST* pHost)
    Console_Log (pHost, aLog);
 
    snprintf (aLog, sizeof (aLog),
-      "liveatc: labels %.0f x %.0f m  clearance %.0f m  billboard %d  scale %d",
-      s_dLabelW, s_dLabelH, s_dLabelAbove, s_nLabelBill, s_nLabelScale);
+      "liveatc: labels %.0f x %.0f m  scale %.2f  clearance %.0f m  distance %s at %.0f m",
+      s_dLabelW, s_dLabelH, s_dLabelSX, s_dLabelAbove,
+      s_bLabelDist ? "on" : "off", s_dLabelNear);
    Console_Log (pHost, aLog);
 
+   if (!s_bAltSet)
+      Fetch_Elevation ();
+   else
+      Origin_Set_Height (s_dOriginZ, "datablock");
    Fetch_ADSB ();
    s_twTimer = Timer_Interval (pHost, SPAWN_HZ, kSNEEZE_ABI_TIMER_UNIT_HZ, 0);
 }
@@ -2545,6 +2772,34 @@ void Instance_Request (HOST* pHost, HREQUEST hRequest, bool bSuccess)
 {
    if (pHost != s_pHost)
       return;
+
+   if (hRequest == s_hElev)
+   {
+      if (!bSuccess)
+         Console_Error (pHost, "liveatc: terrain request failed");
+      else if (Request_Status (hRequest) != 200)
+      {
+         char aMsg[96];
+         snprintf (aMsg, sizeof (aMsg), "liveatc: terrain HTTP %d", Request_Status (hRequest));
+         Console_Error (pHost, aMsg);
+      }
+      else
+      {
+         int32_t  nBody = 0;
+         uint8_t* aBody = Request_Body (hRequest, &nBody);
+
+         if (aBody == 0 || nBody <= 0)
+            Console_Error (pHost, "liveatc: empty terrain tile");
+         else
+            Elev_Apply (aBody, nBody);
+         free (aBody);
+      }
+
+      Request_Close (hRequest);
+      s_hElev = 0;
+      s_bElevPending = false;
+      return;
+   }
 
    if (hRequest != s_hRequest)
       return;
@@ -2714,6 +2969,14 @@ void Instance_Close (HOST* pHost)
       Request_Abort (s_hRequest);
       Request_Close (s_hRequest);
       s_hRequest = 0;
+   }
+
+   if (s_hElev != 0)
+   {
+      Request_Abort (s_hElev);
+      Request_Close (s_hElev);
+      s_hElev = 0;
+      s_bElevPending = false;
    }
 
    Scene_Clear_Crafts ();

@@ -62,16 +62,16 @@ $sdkSources = @(
 ) -join ' '
 
 $emccFlags = "-std=c11 -Os -Wno-address-of-packed-member " +
-             "-I$CInc -I$CSrc -I$AbiInc " +
+             "-I$CInc -I$CSrc -I$AbiInc -I$Here\src " +
              "-sSTANDALONE_WASM -sWASM_BIGINT --no-entry " +
-             "-sERROR_ON_UNDEFINED_SYMBOLS=0 -sMALLOC=emmalloc"
+             "-sERROR_ON_UNDEFINED_SYMBOLS=0 -sMALLOC=emmalloc -sUSE_ZLIB=1"
 
 Write-Host "SDK  $SdkRoot"
 Write-Host "C    $CRoot"
 Write-Host "emsdk $Emsdk"
 
 $name = 'liveATC'
-$emcc = "emcc $emccFlags $sdkSources $Here\src\$name.c -o $Here\wasm\$name.wasm"
+$emcc = "emcc $emccFlags $sdkSources $Here\src\elev.c $Here\src\$name.c -o $Here\wasm\$name.wasm"
 cmd /c "`"$Emsdk\emsdk_env.bat`" >nul 2>&1 && $emcc"
 
 if ($LASTEXITCODE -ne 0)
