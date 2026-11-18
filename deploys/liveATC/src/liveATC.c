@@ -64,8 +64,8 @@
 #define ORIGIN_PAD_METRES   64.0      // unit disk in origin.glb, metres
 #define ELEV_Z              14        // Terrarium tile zoom for the origin height
 #define LABEL_NEAR_M        800.0     // distance at which a tag keeps its set size
-#define LABEL_DIST_MIN      0.35      // farthest tags shrink to this fraction
-#define LABEL_DIST_MAX      2.5       // nearest tags grow to this fraction
+#define LABEL_DIST_MIN      0.25      // closer than this fraction of dNearM, size holds
+#define LABEL_DIST_MAX      32.0      // farther than this multiple of dNearM, size holds
 #define REQUEST_TIMEOUT_MS  15000
 #define LEGEND_ROWS         10
 #define ICON_LEN_DEFAULT    40.0      // typical narrowbody; override per type
@@ -180,7 +180,7 @@ static double   s_dLabelH     = LABEL_H_M;
 static double   s_dLabelSX    = 1.0;
 static double   s_dLabelSY    = 1.0;
 static double   s_dLabelAbove = LABEL_ABOVE_M;
-static bool     s_bLabelDist  = false;     // scale tags by inverse distance from the origin
+static bool     s_bLabelDist  = false;     // grow tags linearly with distance from the origin
 static double   s_dLabelNear  = LABEL_NEAR_M;
 static int      s_nLabelPixW  = 0;
 static int      s_nLabelPixH  = LABEL_RASTER_H;
@@ -1107,8 +1107,10 @@ static int Craft_Find_Icao (const char* sIcao)
 // The icon's top sits about a quarter of its length above the node. dAbove
 // is further clearance. The panel is centered, so half its height is added
 // and the card's bottom clears the airframe.
-// 1 at Label.dNearM from the origin. Nearer tags grow, farther ones shrink,
-// both clamped so a tag on the field does not explode and a distant one stays readable.
+// Linear with distance from the origin: a tag at 2x Label.dNearM is drawn
+// twice as large, so its angle stays about the same for an eye at the origin.
+// The guest has no camera position. A tag on the field does not shrink below
+// a quarter, and one past 32x the reference stops growing.
 static double Label_Distance_Scale (double dX, double dY)
 {
    double d;
@@ -1118,11 +1120,9 @@ static double Label_Distance_Scale (double dX, double dY)
       return 1.0;
 
    d = sqrt (dX * dX + dY * dY);
-   if (d < s_dLabelNear * 0.25)
-      d = s_dLabelNear * 0.25;
-   dS = s_dLabelNear / d;
-   if (dS < LABEL_DIST_MIN)
-      dS = LABEL_DIST_MIN;
+   if (d < s_dLabelNear * LABEL_DIST_MIN)
+      d = s_dLabelNear * LABEL_DIST_MIN;
+   dS = d / s_dLabelNear;
    if (dS > LABEL_DIST_MAX)
       dS = LABEL_DIST_MAX;
    return dS;

@@ -3,7 +3,7 @@
    "Services": [],
    "Modules": [
       {
-         "sUrl": "wasm/liveATC.wasm?v=3"
+         "sUrl": "wasm/liveATC.wasm?v=4"
       }
    ],
    "Primary": {
@@ -28,10 +28,10 @@
          "sName": "LAX",
          "dLat": 33.942791,
          "dLon": -118.410042,
-         "dSize": 64.0
+         "dSize": 4.0
       },
       "RadiusMiles": 5.0,
-      "IconLengthMetres": 40.0,
+      "IconLengthMetres": 4.0,
       "Panel": {
          "dX": 0.0,
          "dY": 0.0,
@@ -50,15 +50,23 @@
       },
       "Label": {
          "Transform": {
-            "Scale": [1, 1, 1]
+            "Scale": [
+               1,
+               1,
+               1
+            ]
          },
          "Bound": {
-            "Max": [50, 16, 0]
+            "Max": [
+               50,
+               16,
+               0
+            ]
          },
          "dWidth": 50.0,
          "dHeight": 16.0,
-         "dScale": 1.0,
-         "bByDistance": 0,
+         "dScale": 100.0,
+         "bByDistance": 1,
          "dNearM": 800.0,
          "dAbove": 12.0,
          "Properties": {
